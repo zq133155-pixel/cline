@@ -22,7 +22,7 @@ const DESCRIPTOR_OUT_DIR = path.resolve("dist-standalone/proto")
 
 const isWindows = process.platform === "win32"
 const TS_PROTO_PLUGIN = isWindows
-	? path.resolve("node_modules/.bin/protoc-gen-ts_proto.cmd") // Use the .bin directory path for Windows
+	? path.resolve("node_modules/.bin/protoc-gen-ts_proto.cmd") // Use the .cmd file for Windows
 	: require.resolve("ts-proto/protoc-gen-ts_proto")
 
 const TS_PROTO_OPTIONS = [

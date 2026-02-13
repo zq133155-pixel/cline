@@ -1,0 +1,9 @@
+onlyBuiltDependencies:
+  - '@bufbuild/buf'
+  - '@vscode/vsce-sign'
+  - better-sqlite3
+  - esbuild
+  - grpc-tools
+  - keytar
+  - protobufjs
+  - puppeteer-chromium-resolver

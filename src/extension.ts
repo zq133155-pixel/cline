@@ -31,6 +31,8 @@ import { sendAddToInputEvent } from "./core/controller/ui/subscribeToAddToInput"
 import { sendShowWebviewEvent } from "./core/controller/ui/subscribeToShowWebview"
 import { HookDiscoveryCache } from "./core/hooks/HookDiscoveryCache"
 import { HookProcessRegistry } from "./core/hooks/HookProcessRegistry"
+import { Task } from "./core/task"
+import { CodeEditTracker } from "./core/task/student-analytics/CodeEditTracker"
 import { workspaceResolver } from "./core/workspace"
 import { findMatchingNotebookCell, getContextForCommand, showWebview } from "./hosts/vscode/commandUtils"
 import { abortCommitGeneration, generateCommitMsg } from "./hosts/vscode/commit-message-generator"
@@ -94,6 +96,11 @@ export async function activate(context: vscode.ExtensionContext) {
 	ClineTempManager.startPeriodicCleanup()
 
 	Logger.log("Cline extension activated")
+
+	// 📊 初始化学生代码编辑行为追踪器
+	const codeEditTracker = new CodeEditTracker()
+	Task.setCodeEditTracker(codeEditTracker)
+	context.subscriptions.push(codeEditTracker)
 
 	const testModeWatchers = await initializeTestMode(webview)
 	// Initialize test mode and add disposables to context
@@ -436,10 +443,14 @@ export async function activate(context: vscode.ExtensionContext) {
 					"Generate Notebook Cell",
 					"Enter your prompt for generating notebook cell (press Enter to confirm & Esc to cancel)",
 				)
-				if (!userPrompt) return
+				if (!userPrompt) {
+					return
+				}
 
 				const ctx = await getNotebookCommandContext(range, diagnostics)
-				if (!ctx) return
+				if (!ctx) {
+					return
+				}
 
 				const notebookContext = `User prompt: ${userPrompt}
 Insert a new Jupyter notebook cell above or below the current cell based on user prompt.
@@ -460,7 +471,9 @@ ${ctx.cellJson || "{}"}
 			commands.JupyterExplainCell,
 			async (range?: vscode.Range, diagnostics?: vscode.Diagnostic[]) => {
 				const ctx = await getNotebookCommandContext(range, diagnostics)
-				if (!ctx) return
+				if (!ctx) {
+					return
+				}
 
 				const notebookContext = ctx.cellJson
 					? `\n\nCurrent Notebook Cell Context (JSON, sanitized of image data):\n\`\`\`json\n${ctx.cellJson}\n\`\`\``
@@ -479,10 +492,14 @@ ${ctx.cellJson || "{}"}
 					"Improve Notebook Cell",
 					"Enter your prompt for improving the current notebook cell (press Enter to confirm & Esc to cancel)",
 				)
-				if (!userPrompt) return
+				if (!userPrompt) {
+					return
+				}
 
 				const ctx = await getNotebookCommandContext(range, diagnostics)
-				if (!ctx) return
+				if (!ctx) {
+					return
+				}
 
 				const notebookContext = `User prompt: ${userPrompt}
 ${NOTEBOOK_EDIT_INSTRUCTIONS}

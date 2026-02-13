@@ -106,6 +106,15 @@ import { StateManager } from "../storage/StateManager"
 import { FocusChainManager } from "./focus-chain"
 import { MessageStateHandler } from "./message-state"
 import { StreamResponseHandler } from "./StreamResponseHandler"
+import {
+	AdoptionTracker,
+	CodeEditTracker,
+	contentAnalyzer,
+	type StudentInteractionLog,
+	StudentLogPersister,
+	type SuggestionType,
+	taskClassifier,
+} from "./student-analytics"
 import { TaskState } from "./TaskState"
 import { ToolExecutor } from "./ToolExecutor"
 import { detectAvailableCliTools, extractProviderDomainFromUrl, updateApiReqMsg } from "./utils"
@@ -724,6 +733,21 @@ export class Task {
 			throw new Error("Cline instance aborted")
 		}
 
+		// 记录 turn-level 日志：当用户发送反馈消息时（非 partial 更新）
+		if (type === "user_feedback" && partial !== true) {
+			// 使用 void 确保日志记录是异步的，不阻塞主流程
+			void this.persistTurnLevelLog(text, images, files)
+			// 通知采纳追踪器：用户发送了新消息
+			const currentCategory = taskClassifier.classify(text)
+			const isSameTopic = AdoptionTracker.isSameTopicHeuristic(this.lastAssistantCategory, currentCategory)
+			const adoptionStatus = this.adoptionTracker.onUserMessage(this.taskId, isSameTopic)
+			if (adoptionStatus !== "unknown") {
+				Logger.info(`[AdoptionInfer] taskId=${this.taskId}, status=${adoptionStatus}`)
+				// 持久化采纳推断结果到 JSONL
+				void this.persistAdoptionInferLog(adoptionStatus)
+			}
+		}
+
 		const providerInfo = this.getCurrentProviderInfo()
 		const modelInfo: ClineMessageModelInfo = {
 			providerId: providerInfo.providerId,
@@ -852,6 +876,260 @@ export class Task {
 		return await this.controller.toggleActModeForYoloMode()
 	}
 
+	// 学生日志持久化器实例
+	private studentLogPersister: StudentLogPersister | undefined
+	// AI 建议采纳推断器
+	private adoptionTracker: AdoptionTracker = new AdoptionTracker()
+	// 代码编辑追踪器（全局单例，由 extension.ts 注入）
+	private static codeEditTracker: CodeEditTracker | undefined
+	// 上一条 assistant turn 的分类信息（用于同主题判断）
+	private lastAssistantCategory: string | undefined
+
+	/**
+	 * 设置全局代码编辑追踪器（由 extension.ts 在激活时调用）
+	 */
+	public static setCodeEditTracker(tracker: CodeEditTracker): void {
+		Task.codeEditTracker = tracker
+	}
+
+	/**
+	 * 获取全局代码编辑追踪器
+	 */
+	public static getCodeEditTracker(): CodeEditTracker | undefined {
+		return Task.codeEditTracker
+	}
+
+	/**
+	 * 获取学生日志持久化器（懒加载）
+	 */
+	private getStudentLogPersister(): StudentLogPersister {
+		if (!this.studentLogPersister) {
+			this.studentLogPersister = new StudentLogPersister(this.cwd)
+		}
+		return this.studentLogPersister
+	}
+
+	/**
+	 * 构建并持久化学生交互日志（任务开始时调用）
+	 * 重构后的方法：只负责组装 StudentInteractionLog 对象并调用持久化服务
+	 */
+	private async persistStudentInteractionLog(task?: string, images?: string[], files?: string[]): Promise<void> {
+		try {
+			const persister = this.getStudentLogPersister()
+
+			// 使用 TaskClassifier 进行任务分类
+			const category = taskClassifier.classify(task)
+
+			// 使用 ContentAnalyzer 进行内容分析
+			const analysis = contentAnalyzer.analyze(task)
+
+			// 获取当前任务的轮次索引
+			const turnIndex = persister.getNextTurnIndex(this.taskId)
+
+			// 组装规范化的日志对象
+			const log: StudentInteractionLog = {
+				ts: new Date().toISOString(),
+				taskId: this.taskId,
+				eventType: "task_start",
+				role: "user",
+				category,
+				contentLength: analysis.contentLength,
+				hasCode: analysis.hasCode,
+				languageHint: analysis.languageHint,
+				imageCount: images?.length ?? 0,
+				fileCount: files?.length ?? 0,
+				turnIndex,
+				// 可选：保存原始内容用于离线分析（如果内容不太长）
+				rawContent: task && task.length <= 2000 ? task : undefined,
+			}
+
+			// 持久化日志
+			await persister.persist(log)
+		} catch (error) {
+			Logger.error("Failed to persist student interaction log", error as Error)
+		}
+	}
+
+	/**
+	 * 持久化 turn-level 日志（用户在同一任务内发送后续消息时调用）
+	 * @param text 用户输入的文本内容
+	 * @param images 附带的图片数组
+	 * @param files 附带的文件数组
+	 */
+	private async persistTurnLevelLog(text?: string, images?: string[], files?: string[]): Promise<void> {
+		try {
+			const persister = this.getStudentLogPersister()
+
+			// 使用 TaskClassifier 进行任务分类
+			const category = taskClassifier.classify(text)
+
+			// 使用 ContentAnalyzer 进行内容分析
+			const analysis = contentAnalyzer.analyze(text)
+
+			// 获取当前任务的轮次索引（自增）
+			const turnIndex = persister.getNextTurnIndex(this.taskId)
+
+			// 组装规范化的日志对象
+			const log: StudentInteractionLog = {
+				ts: new Date().toISOString(),
+				taskId: this.taskId,
+				eventType: "turn_message",
+				role: "user",
+				category,
+				contentLength: analysis.contentLength,
+				hasCode: analysis.hasCode,
+				languageHint: analysis.languageHint,
+				imageCount: images?.length ?? 0,
+				fileCount: files?.length ?? 0,
+				turnIndex,
+				// 可选：保存原始内容用于离线分析（如果内容不太长）
+				rawContent: text && text.length <= 2000 ? text : undefined,
+			}
+
+			// 持久化日志
+			await persister.persist(log)
+			Logger.info(`[StudentTurnLog] taskId=${this.taskId}, turnIndex=${turnIndex}, content=${text?.substring(0, 100)}`)
+		} catch (error) {
+			// 日志写入失败时只记录错误，不影响原有功能
+			Logger.error("Failed to persist turn-level log", error as Error)
+		}
+	}
+
+	/**
+	 * 持久化 AI assistant turn 日志（AI 回复流完成后调用）
+	 * @param assistantText AI 回复的纯文本内容
+	 * @param assistantMessageContent AI 回复的完整内容块（含工具调用）
+	 */
+	private async persistAssistantTurnLog(
+		assistantText: string,
+		assistantMessageContent: Array<{ type: string; name?: string; partial?: boolean }>,
+	): Promise<void> {
+		try {
+			const persister = this.getStudentLogPersister()
+
+			// 分析 AI 回复内容
+			const analysis = contentAnalyzer.analyze(assistantText)
+			const category = taskClassifier.classify(assistantText)
+
+			// 提取使用的工具列表
+			const toolsUsed = assistantMessageContent
+				.filter((block) => block.type === "tool_use" && block.name)
+				.map((block) => block.name as string)
+
+			// 推断建议类型
+			const suggestionType = this.inferSuggestionType(toolsUsed, assistantText)
+
+			// 获取轮次索引
+			const turnIndex = persister.getNextTurnIndex(this.taskId)
+
+			// 组装日志对象
+			const log: StudentInteractionLog = {
+				ts: new Date().toISOString(),
+				taskId: this.taskId,
+				eventType: "turn_message",
+				role: "assistant",
+				category,
+				contentLength: analysis.contentLength,
+				hasCode: analysis.hasCode,
+				languageHint: analysis.languageHint,
+				imageCount: 0,
+				fileCount: 0,
+				turnIndex,
+				rawContent: assistantText && assistantText.length <= 2000 ? assistantText : undefined,
+				suggestionType,
+				toolsUsed: toolsUsed.length > 0 ? toolsUsed : undefined,
+			}
+
+			// 持久化日志
+			await persister.persist(log)
+
+			// 保存当前分类用于后续同主题判断
+			this.lastAssistantCategory = category
+
+			// 注册到采纳追踪器
+			this.adoptionTracker.registerAssistantTurn(this.taskId, turnIndex, suggestionType, analysis.hasCode, log.ts)
+
+			Logger.info(
+				`[StudentAssistantLog] taskId=${this.taskId}, turnIndex=${turnIndex}, suggestion=${suggestionType}, tools=[${toolsUsed.join(",")}]`,
+			)
+		} catch (error) {
+			Logger.error("Failed to persist assistant turn log", error as Error)
+		}
+	}
+
+	/**
+	 * 根据 AI 使用的工具推断建议类型
+	 */
+	private inferSuggestionType(toolsUsed: string[], assistantText: string): SuggestionType {
+		if (toolsUsed.length === 0) {
+			// 没有使用工具：判断文本内容
+			if (contentAnalyzer.detectCode(assistantText)) {
+				return "code_generation"
+			}
+			return "explanation"
+		}
+
+		// 单一工具
+		if (toolsUsed.length === 1) {
+			const tool = toolsUsed[0]
+			switch (tool) {
+				case "write_to_file":
+					return "code_generation"
+				case "replace_in_file":
+				case "apply_patch":
+					return "code_edit"
+				case "attempt_completion":
+					return "completion"
+				case "ask_followup_question":
+					return "question"
+				case "execute_command":
+					return "command"
+				default:
+					return "other"
+			}
+		}
+
+		// 多工具情况：判断是否有代码修改类工具
+		const hasCodeTool = toolsUsed.some((t) => t === "write_to_file" || t === "replace_in_file" || t === "apply_patch")
+		const hasCompletion = toolsUsed.includes("attempt_completion")
+
+		if (hasCompletion) {
+			return "completion"
+		}
+		if (hasCodeTool) {
+			return "mixed"
+		}
+
+		return "mixed"
+	}
+
+	/**
+	 * 持久化 AI 建议采纳推断结果
+	 * 写入一条 adoption_infer 事件到 JSONL，供离线分析脚本读取
+	 */
+	private async persistAdoptionInferLog(adoptionStatus: import("./student-analytics").AdoptionStatus): Promise<void> {
+		try {
+			const persister = this.getStudentLogPersister()
+			const log: StudentInteractionLog = {
+				ts: new Date().toISOString(),
+				taskId: this.taskId,
+				eventType: "adoption_infer",
+				role: "assistant",
+				category: (this.lastAssistantCategory as any) || "other",
+				contentLength: 0,
+				hasCode: false,
+				languageHint: "unknown",
+				imageCount: 0,
+				fileCount: 0,
+				turnIndex: -1,
+				adoptionStatus,
+			}
+			await persister.persist(log)
+		} catch (error) {
+			Logger.error("Failed to persist adoption infer log", error as Error)
+		}
+	}
+
 	/**
 	 * Unified cancellation handler for hook-requested cancellations.
 	 * Ensures state is always saved before aborting, regardless of whether
@@ -942,6 +1220,12 @@ export class Task {
 	// Task lifecycle
 
 	public async startTask(task?: string, images?: string[], files?: string[]): Promise<void> {
+		Logger.info(`[StudentTaskStart] taskId=${this.taskId}, content=${task}`)
+		await this.persistStudentInteractionLog(task, images, files)
+		// 注册代码编辑追踪器上下文
+		if (Task.codeEditTracker) {
+			Task.codeEditTracker.setContext(this.taskId, this.getStudentLogPersister(), this.adoptionTracker)
+		}
 		try {
 			await this.clineIgnoreController.initialize()
 		} catch (error) {
@@ -2870,6 +3154,14 @@ export class Task {
 			}
 
 			this.taskState.didCompleteReadingStream = true
+
+			// 📊 记录 AI assistant turn 日志（流式响应完成后）
+			if (assistantMessage.length > 0) {
+				void this.persistAssistantTurnLog(
+					assistantTextOnly,
+					this.taskState.assistantMessageContent as Array<{ type: string; name?: string; partial?: boolean }>,
+				)
+			}
 
 			// set any blocks to be complete to allow presentAssistantMessage to finish and set userMessageContentReady to true
 			// (could be a text block that had no subsequent tool uses, or a text block at the very end, or an invalid tool use, etc. whatever the case, presentAssistantMessage relies on these blocks either to be completed or the user to reject a block in order to proceed and eventually set userMessageContentReady to true)

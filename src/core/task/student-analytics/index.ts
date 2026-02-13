@@ -1,0 +1,11 @@
+/**
+ * 学生编程行为分析模块 - 统一导出
+ * Student Programming Behavior Analytics Module - Unified Exports
+ */
+
+export { AdoptionTracker } from "./AdoptionTracker"
+export { CodeEditTracker } from "./CodeEditTracker"
+export { ContentAnalyzer, contentAnalyzer } from "./ContentAnalyzer"
+export { StudentLogPersister } from "./StudentLogPersister"
+export { TaskClassifier, taskClassifier } from "./TaskClassifier"
+export * from "./types"

@@ -27,7 +27,7 @@ export class PostHogErrorProvider implements IErrorProvider {
 		this.client = new PostHog(clientConfig.errorTrackingApiKey, {
 			host: clientConfig.host,
 			enableExceptionAutocapture: false, // NOTE: Re-enable it once the api key is set to env var
-			before_send: (event) => PostHogClientProvider.eventFilter(event),
+			before_send: (event: any) => PostHogClientProvider.eventFilter(event),
 		})
 		// Initialize error settings
 		this.errorSettings = {
