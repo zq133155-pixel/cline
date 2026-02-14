@@ -134,3 +134,59 @@ export interface LogStatsSummary {
 		end: string
 	}
 }
+
+// =============================================
+// 学生能力画像 (Student Profile) 类型定义
+// =============================================
+
+/**
+ * 学习风格分类
+ *
+ * - Exploratory: 探索型 — 大量多轮对话、尝试多种类别、主动修改代码
+ * - Dependent:   依赖型 — 高度依赖 AI 输出、较少自主编辑
+ * - Optimizer:   优化型 — 采纳 AI 建议后频繁自主修改和打磨
+ * - Debugger:    调试型 — 以调试类任务为主
+ * - Balanced:    均衡型 — 各维度表现适中
+ */
+export type LearningStyle = "Exploratory" | "Dependent" | "Optimizer" | "Debugger" | "Balanced"
+
+/**
+ * 学生能力画像
+ */
+export interface StudentProfile {
+	// ---- 基础统计 ----
+	/** 唯一任务数 */
+	totalTasks: number
+	/** 平均每任务轮次数 */
+	avgTurnsPerTask: number
+	/** 总交互记录数 */
+	totalInteractions: number
+
+	// ---- 核心能力指标 (0–1) ----
+	/** AI 依赖度 = assistant turns / (user + assistant turns) */
+	aiDependencyScore: number
+	/** 代码编辑比 = code_edit 次数 / assistant 含代码回复数 */
+	codeEditRatio: number
+	/** AI 建议采纳率 = adopted / (adopted + rejected + continued) */
+	adoptionRate: number
+	/** 自主修改率 = 有 code_edit 事件的任务数 / 有 AI 代码输出的任务数 */
+	selfModificationRate: number
+	/** 调试频率 = debugging 类任务 / 总任务 (对话维度) */
+	debuggingFrequency: number
+	/** 探索广度 = 使用的不同 category 数 / 所有可用 category 数 */
+	explorationBreadth: number
+
+	// ---- 高级维度 ----
+	/** 主导任务类别 */
+	dominantCategory: TaskCategory | "unknown"
+	/** 综合学习风格 */
+	learningStyle: LearningStyle
+	/** 学习风格置信度 (0–1)；越高说明特征越鲜明 */
+	styleConfidence: number
+
+	// ---- 元数据 ----
+	/** 画像生成时间 (ISO 8601) */
+	generatedAt: string
+	/** 分析所覆盖的时间区间 */
+	timeRange: { start: string; end: string }
+}

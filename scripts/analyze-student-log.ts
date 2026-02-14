@@ -89,6 +89,27 @@ interface AnalysisResult {
 	totalFileSaves: number // 文件保存总数
 }
 
+// ============= 学生画像类型（与 src/core/task/student-analytics/types.ts 保持一致） =============
+
+type LearningStyle = "Exploratory" | "Dependent" | "Optimizer" | "Debugger" | "Balanced"
+
+interface StudentProfile {
+	totalTasks: number
+	avgTurnsPerTask: number
+	totalInteractions: number
+	aiDependencyScore: number
+	codeEditRatio: number
+	adoptionRate: number
+	selfModificationRate: number
+	debuggingFrequency: number
+	explorationBreadth: number
+	dominantCategory: string
+	learningStyle: LearningStyle
+	styleConfidence: number
+	generatedAt: string
+	timeRange: { start: string; end: string }
+}
+
 // ============= 分析函数 =============
 
 function readLogs(logPath: string): StudentInteractionLog[] {
@@ -279,6 +300,160 @@ function analyzeLogs(logs: StudentInteractionLog[]): AnalysisResult {
 	}
 }
 
+// ============= 学生画像生成函数 =============
+
+const ALL_CATEGORIES: TaskCategory[] = [
+	"algorithm",
+	"debugging",
+	"explanation",
+	"language_request",
+	"code_generation",
+	"refactoring",
+	"testing",
+	"other",
+]
+
+function sigmoid(x: number, center: number, steepness: number): number {
+	return 1 / (1 + Math.exp(-steepness * (x - center)))
+}
+
+function midness(x: number): number {
+	return 1 - 2 * Math.abs(x - 0.5)
+}
+
+function generateStudentProfile(logs: StudentInteractionLog[]): StudentProfile {
+	const conversationLogs = logs.filter((l) => l.eventType === "task_start" || l.eventType === "turn_message")
+	const userTurns = conversationLogs.filter((l) => l.role === "user")
+	const assistantTurns = conversationLogs.filter((l) => l.role === "assistant")
+	const codeEdits = logs.filter((l) => l.eventType === "code_edit")
+	const adoptionLogs = logs.filter((l) => l.eventType === "adoption_infer")
+
+	const uniqueTaskIds = new Set(logs.map((l) => l.taskId))
+	const totalTasks = uniqueTaskIds.size
+
+	// 平均每任务轮次
+	const taskTurnMax = new Map<string, number>()
+	for (const log of conversationLogs) {
+		const cur = taskTurnMax.get(log.taskId) || 0
+		taskTurnMax.set(log.taskId, Math.max(cur, (log.turnIndex || 0) + 1))
+	}
+	const totalTurns = Array.from(taskTurnMax.values()).reduce((s, v) => s + v, 0)
+	const avgTurnsPerTask = totalTasks > 0 ? totalTurns / totalTasks : 0
+
+	// AI 依赖度
+	const totalConv = userTurns.length + assistantTurns.length
+	const aiDependencyScore = totalConv > 0 ? assistantTurns.length / totalConv : 0
+
+	// 代码编辑比
+	const assistantWithCode = assistantTurns.filter((l) => l.hasCode).length
+	const codeEditRatio = assistantWithCode > 0 ? Math.min(codeEdits.length / assistantWithCode, 1) : 0
+
+	// 采纳率
+	const determined = adoptionLogs.filter((l) => l.adoptionStatus && l.adoptionStatus !== "unknown")
+	const adoptedCount = determined.filter((l) => l.adoptionStatus === "adopted").length
+	const adoptionRate = determined.length > 0 ? adoptedCount / determined.length : 0
+
+	// 自主修改率
+	const tasksWithAiCode = new Set(assistantTurns.filter((l) => l.hasCode).map((l) => l.taskId))
+	const tasksWithEdit = new Set(codeEdits.map((l) => l.taskId))
+	let overlap = 0
+	for (const tid of tasksWithEdit) {
+		if (tasksWithAiCode.has(tid)) overlap++
+	}
+	const selfModificationRate = tasksWithAiCode.size > 0 ? overlap / tasksWithAiCode.size : 0
+
+	// 调试频率
+	const debuggingFrequency =
+		conversationLogs.length > 0
+			? conversationLogs.filter((l) => l.category === "debugging").length / conversationLogs.length
+			: 0
+
+	// 探索广度
+	const usedCategories = new Set(conversationLogs.map((l) => l.category).filter(Boolean))
+	const explorationBreadth = usedCategories.size / ALL_CATEGORIES.length
+
+	// 主导类别
+	const catFreq: Record<string, number> = {}
+	for (const log of conversationLogs) {
+		const cat = log.category || "unknown"
+		catFreq[cat] = (catFreq[cat] || 0) + 1
+	}
+	let dominantCategory = "unknown"
+	let maxCatCount = 0
+	for (const [cat, count] of Object.entries(catFreq)) {
+		if (count > maxCatCount) {
+			maxCatCount = count
+			dominantCategory = cat
+		}
+	}
+
+	// 时间范围
+	const timestamps = logs
+		.map((l) => l.ts)
+		.filter(Boolean)
+		.sort()
+	const timeRange = { start: timestamps[0] || "", end: timestamps[timestamps.length - 1] || "" }
+
+	// ---- 学习风格推断 ----
+	const scores: Record<LearningStyle, number> = {
+		Dependent: 0,
+		Exploratory: 0,
+		Optimizer: 0,
+		Debugger: 0,
+		Balanced: 0,
+	}
+
+	scores.Dependent = sigmoid(aiDependencyScore, 0.65, 10) * 0.4 + (1 - selfModificationRate) * 0.3 + (1 - codeEditRatio) * 0.3
+
+	scores.Exploratory =
+		sigmoid(avgTurnsPerTask, 4, 1) * 0.3 + explorationBreadth * 0.35 + codeEditRatio * 0.2 + selfModificationRate * 0.15
+
+	scores.Optimizer = adoptionRate * 0.3 + selfModificationRate * 0.35 + codeEditRatio * 0.35
+
+	scores.Debugger =
+		debuggingFrequency * 0.6 + sigmoid(avgTurnsPerTask, 3, 1) * 0.2 + (dominantCategory === "debugging" ? 0.2 : 0)
+
+	const midnessSum = midness(aiDependencyScore) + midness(codeEditRatio) + midness(adoptionRate) + midness(selfModificationRate)
+	scores.Balanced = midnessSum / 4
+
+	let bestStyle: LearningStyle = "Balanced"
+	let bestScore = 0
+	for (const [style, score] of Object.entries(scores) as [LearningStyle, number][]) {
+		if (score > bestScore) {
+			bestScore = score
+			bestStyle = style
+		}
+	}
+
+	const sortedScores = Object.values(scores).sort((a, b) => b - a)
+	const gap = sortedScores.length > 1 ? sortedScores[0] - sortedScores[1] : sortedScores[0]
+	let styleConfidence = Math.min(bestScore * 0.6 + gap * 0.4, 1)
+
+	if (bestScore < 0.3) {
+		bestStyle = "Balanced"
+		styleConfidence = bestScore
+	}
+
+	return {
+		totalTasks,
+		avgTurnsPerTask,
+		totalInteractions: logs.length,
+		aiDependencyScore,
+		codeEditRatio,
+		adoptionRate,
+		selfModificationRate,
+		debuggingFrequency,
+		explorationBreadth,
+		dominantCategory,
+		learningStyle: bestStyle,
+		styleConfidence: parseFloat(styleConfidence.toFixed(3)),
+		generatedAt: new Date().toISOString(),
+		timeRange,
+	}
+}
+
+// ============= 格式化辅助 =============
+
 function formatPercentage(value: number): string {
 	return `${(value * 100).toFixed(1)}%`
 }
@@ -393,13 +568,69 @@ function printReport(result: AnalysisResult): void {
 	console.log("=".repeat(60) + "\n")
 }
 
-function exportToJson(result: AnalysisResult, outputPath: string): void {
-	const output = {
-		generatedAt: new Date().toISOString(),
-		...result,
+const STYLE_LABELS: Record<LearningStyle, string> = {
+	Exploratory: "探索型 (Exploratory)",
+	Dependent: "依赖型 (Dependent)",
+	Optimizer: "优化型 (Optimizer)",
+	Debugger: "调试型 (Debugger)",
+	Balanced: "均衡型 (Balanced)",
+}
+
+const STYLE_DESCRIPTIONS: Record<LearningStyle, string> = {
+	Exploratory: "倾向大量多轮探索、涉猎多种任务类型、主动修改代码",
+	Dependent: "高度依赖 AI 输出，较少自主编辑，偏向被动接受建议",
+	Optimizer: "采纳 AI 建议后频繁进行自主改进与打磨",
+	Debugger: "以调试排错类任务为主，专注于定位与修复问题",
+	Balanced: "各维度表现适中，未呈现明显偏向",
+}
+
+function printProfile(profile: StudentProfile): void {
+	console.log("\n" + "=".repeat(60))
+	console.log("🎓 学生能力画像报告 (Student Profile)")
+	console.log("=".repeat(60) + "\n")
+
+	console.log("📋 基本信息")
+	console.log("-".repeat(40))
+	console.log(`   唯一任务数:       ${profile.totalTasks}`)
+	console.log(`   总交互记录:       ${profile.totalInteractions}`)
+	console.log(`   平均每任务轮次:   ${profile.avgTurnsPerTask.toFixed(2)}`)
+	console.log(`   主导任务类别:     ${profile.dominantCategory}`)
+	console.log()
+
+	console.log("📊 核心能力指标 (0–1 标准化)")
+	console.log("-".repeat(40))
+	const metrics: [string, number][] = [
+		["AI 依赖度", profile.aiDependencyScore],
+		["代码编辑比", profile.codeEditRatio],
+		["AI 建议采纳率", profile.adoptionRate],
+		["自主修改率", profile.selfModificationRate],
+		["调试频率", profile.debuggingFrequency],
+		["探索广度", profile.explorationBreadth],
+	]
+	for (const [label, value] of metrics) {
+		const barLen = Math.round(value * 25)
+		const bar = "█".repeat(barLen) + "░".repeat(25 - barLen)
+		console.log(`   ${label.padEnd(16)} ${value.toFixed(3)}  ${bar}`)
 	}
-	fs.writeFileSync(outputPath, JSON.stringify(output, null, 2), "utf8")
-	console.log(`📁 JSON 报告已导出到: ${outputPath}`)
+	console.log()
+
+	console.log("🧠 学习风格判定")
+	console.log("-".repeat(40))
+	console.log(`   风格:   ${STYLE_LABELS[profile.learningStyle]}`)
+	console.log(`   置信度: ${(profile.styleConfidence * 100).toFixed(1)}%`)
+	console.log(`   描述:   ${STYLE_DESCRIPTIONS[profile.learningStyle]}`)
+	console.log()
+
+	if (profile.timeRange.start && profile.timeRange.end) {
+		console.log("⏰ 分析时间范围")
+		console.log("-".repeat(40))
+		console.log(`   开始: ${profile.timeRange.start}`)
+		console.log(`   结束: ${profile.timeRange.end}`)
+		console.log()
+	}
+
+	console.log(`📅 画像生成时间: ${profile.generatedAt}`)
+	console.log("=".repeat(60) + "\n")
 }
 
 // ============= 主程序 =============
@@ -428,11 +659,23 @@ function main(): void {
 	// 打印报告
 	printReport(result)
 
+	// 3.0 新增：生成学生画像
+	console.log("\n🎓 正在生成学生能力画像...")
+	const profile = generateStudentProfile(logs)
+	printProfile(profile)
+
 	// 可选：导出 JSON
 	const exportJson = args.includes("--json") || args.includes("-j")
 	if (exportJson) {
 		const jsonOutputPath = logPath.replace(/\.log$/, "_analysis.json")
-		exportToJson(result, jsonOutputPath)
+		// 将画像一并写入 JSON
+		const output = {
+			generatedAt: new Date().toISOString(),
+			analysis: result,
+			studentProfile: profile,
+		}
+		fs.writeFileSync(jsonOutputPath, JSON.stringify(output, null, 2), "utf8")
+		console.log(`📁 JSON 报告已导出到: ${jsonOutputPath}`)
 	}
 }
 
