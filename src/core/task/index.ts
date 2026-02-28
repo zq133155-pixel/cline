@@ -111,6 +111,7 @@ import {
 	BehaviorMonitor,
 	CodeEditTracker,
 	contentAnalyzer,
+	InterventionEvaluator,
 	type StudentInteractionLog,
 	StudentLogPersister,
 	type SuggestionType,
@@ -888,6 +889,8 @@ export class Task {
 	private behaviorMonitor: BehaviorMonitor | undefined
 	// 教学干预管理器（任务级）
 	private interventionManager: TeachingInterventionManager | undefined
+	// 干预效果评估器（任务级）
+	private interventionEvaluator: InterventionEvaluator | undefined
 	// 上一条 assistant turn 的分类信息（用于同主题判断）
 	private lastAssistantCategory: string | undefined
 
@@ -952,6 +955,23 @@ export class Task {
 	}
 
 	/**
+	 * 获取干预效果评估器（懒加载）
+	 * 跟随 BehaviorMonitor 的启用状态
+	 */
+	private getInterventionEvaluator(): InterventionEvaluator | undefined {
+		if (!this.getBehaviorMonitor()) {
+			return undefined
+		}
+
+		if (!this.interventionEvaluator) {
+			this.interventionEvaluator = new InterventionEvaluator(this.taskId)
+			Logger.info(`[InterventionEvaluator] created for taskId=${this.taskId}`)
+		}
+
+		return this.interventionEvaluator
+	}
+
+	/**
 	 * 旁路上报行为事件（不阻塞主流程）
 	 */
 	private monitorBehavior(log: StudentInteractionLog): void {
@@ -962,6 +982,17 @@ export class Task {
 				return
 			}
 			monitor.ingest(log)
+
+			// 将事件同时喂入干预效果评估器
+			const evaluator = this.getInterventionEvaluator()
+			if (evaluator) {
+				evaluator.ingest(log)
+
+				// 检查是否有完成评估的日志需要持久化
+				if (evaluator.hasPendingEvaluationLogs()) {
+					void this.persistEvaluationLogs()
+				}
+			}
 		} catch (error) {
 			Logger.warn("Behavior monitor ingest failed", error)
 		}
@@ -1189,6 +1220,61 @@ export class Task {
 			this.monitorBehavior(log)
 		} catch (error) {
 			Logger.error("Failed to persist adoption infer log", error as Error)
+		}
+	}
+
+	/**
+	 * 持久化干预效果评估日志
+	 * 从 InterventionEvaluator 消费评估结果，以 JSONL 写入日志文件
+	 */
+	private async persistEvaluationLogs(): Promise<void> {
+		try {
+			const evaluator = this.getInterventionEvaluator()
+			if (!evaluator || !evaluator.hasPendingEvaluationLogs()) {
+				return
+			}
+
+			const persister = this.getStudentLogPersister()
+			const evalLogs = evaluator.consumePendingEvaluationLogs()
+
+			for (const evalLog of evalLogs) {
+				// 将评估日志转换为 StudentInteractionLog 格式进行持久化
+				// 使用 intervention_evaluation 事件类型，额外字段存入 rawContent 作为 JSON
+				const log: StudentInteractionLog = {
+					ts: evalLog.ts,
+					taskId: evalLog.taskId,
+					eventType: "intervention_evaluation",
+					role: "system",
+					category: "other",
+					contentLength: 0,
+					hasCode: false,
+					languageHint: "unknown",
+					imageCount: 0,
+					fileCount: 0,
+					turnIndex: -1,
+					// 将完整评估结果序列化存入 rawContent，便于离线分析
+					rawContent: JSON.stringify({
+						sessionId: evalLog.sessionId,
+						ruleId: evalLog.ruleId,
+						severity: evalLog.severity,
+						style: evalLog.style,
+						outcome: evalLog.outcome,
+						confidence: evalLog.confidence,
+						preSnapshot: evalLog.preSnapshot,
+						postSnapshot: evalLog.postSnapshot,
+						behaviorDelta: evalLog.behaviorDelta,
+						observedEventCount: evalLog.observedEventCount,
+						evaluationDurationMs: evalLog.evaluationDurationMs,
+					}),
+				}
+				await persister.persist(log)
+
+				Logger.info(
+					`[InterventionEvaluator][${this.taskId}] evaluation log persisted: sessionId=${evalLog.sessionId}, outcome=${evalLog.outcome}, confidence=${evalLog.confidence.toFixed(2)}`,
+				)
+			}
+		} catch (error) {
+			Logger.error("Failed to persist intervention evaluation logs", error as Error)
 		}
 	}
 
@@ -1881,6 +1967,11 @@ export class Task {
 			await this.browserSession.dispose()
 			this.clineIgnoreController.dispose()
 			this.fileContextTracker.dispose()
+			// 清理干预效果评估器，强制完成所有进行中的评估会话
+			if (this.interventionEvaluator) {
+				this.interventionEvaluator.dispose()
+				await this.persistEvaluationLogs()
+			}
 			// need to await for when we want to make sure directories/files are reverted before
 			// re-starting the task from a checkpoint
 			await this.diffViewProvider.revertChanges()
@@ -2806,6 +2897,28 @@ export class Task {
 					Logger.info(
 						`[TeachingIntervention][${this.taskId}] intervention injected at apiRequestCount=${this.taskState.apiRequestCount}`,
 					)
+
+					// ========== 启动干预效果评估 ==========
+					// 干预成功注入后，在评估器中启动一个观察窗口
+					// 后续的行为事件会自动通过 monitorBehavior → evaluator.ingest 进入评估流程
+					const evaluator = this.getInterventionEvaluator()
+					if (evaluator && monitor) {
+						// 从 BehaviorMonitor 当前状态创建"干预前"快照
+						const preSnapshot = InterventionEvaluator.createSnapshotFromMetrics(
+							monitor.getAssistantCodeStreak(),
+							monitor.getTurnsSinceLastEdit(),
+							this.taskState.apiRequestCount,
+						)
+						// 获取最近一次干预的 InterventionMessage（从历史记录中取）
+						const history = interventionManager.getInterventionHistory()
+						const lastRecord = history[history.length - 1]
+						if (lastRecord) {
+							const sessionId = evaluator.startEvaluation(lastRecord.intervention, preSnapshot)
+							if (sessionId) {
+								Logger.info(`[InterventionEvaluator][${this.taskId}] evaluation session started: ${sessionId}`)
+							}
+						}
+					}
 				}
 			}
 		} catch (error) {

@@ -30,6 +30,7 @@ export type LogEventType =
 	| "code_edit" // 学生代码编辑行为
 	| "file_save" // 学生保存文件行为
 	| "adoption_infer" // AI 建议采纳推断结果
+	| "intervention_evaluation" // 教学干预效果评估结果
 
 /**
  * 消息角色
@@ -287,4 +288,142 @@ export interface InterventionManagerOptions {
 	preferredStyle?: InterventionStyle
 	/** 是否在 OutputChannel 同时输出干预日志 */
 	logToOutputChannel?: boolean
+}
+
+// =============================================
+// 干预效果评估 (Intervention Evaluation) 类型定义
+// =============================================
+
+/**
+ * 干预效果评估结果
+ *
+ * - improved:   行为改善 — 学生在干预后出现了积极的行为变化
+ * - neutral:    无明显变化 — 行为与干预前基本一致
+ * - no_effect:  无效 — 学生持续原有的依赖行为
+ */
+export type EvaluationOutcome = "improved" | "neutral" | "no_effect"
+
+/**
+ * 行为快照 — 在干预触发时和观察窗口结束时各拍一次
+ * 用于量化对比干预前后的行为变化
+ */
+export interface BehaviorSnapshot {
+	/** 快照时间 (ISO 8601) */
+	ts: string
+	/** 当前连续代码生成次数 */
+	assistantCodeStreak: number
+	/** 连续无编辑轮次数 */
+	turnsSinceLastEdit: number
+	/** 观察窗口内 code_edit 事件数 */
+	codeEditCount: number
+	/** 观察窗口内 assistant 含代码回复数 */
+	assistantCodeTurnCount: number
+	/** 观察窗口内 user 主动发送的消息数（含追问/思考） */
+	userTurnCount: number
+	/** 当前对话轮次索引 */
+	turnIndex: number
+}
+
+/**
+ * 干预效果评估会话
+ * 一次干预触发 → 一次评估会话，在观察窗口结束后产出结果
+ */
+export interface EvaluationSession {
+	/** 会话唯一标识 */
+	sessionId: string
+	/** 所属任务 ID */
+	taskId: string
+	/** 触发干预的规则 ID */
+	ruleId: BehaviorRuleId
+	/** 干预严重等级 */
+	severity: InterventionSeverity
+	/** 干预风格 */
+	style: InterventionStyle
+	/** 干预触发时的行为快照 */
+	preSnapshot: BehaviorSnapshot
+	/** 观察窗口结束时的行为快照（null 表示窗口尚未关闭） */
+	postSnapshot: BehaviorSnapshot | null
+	/** 观察窗口大小（需收集的事件数） */
+	observationWindowSize: number
+	/** 观察窗口内已收集的事件数 */
+	observedEventCount: number
+	/** 评估结果（null 表示尚未完成评估） */
+	outcome: EvaluationOutcome | null
+	/** 置信度 (0–1)，越高说明判定越可靠 */
+	confidence: number
+	/** 各行为维度的 delta 变化量 */
+	behaviorDelta: BehaviorDelta | null
+	/** 会话开始时间 (ISO 8601) */
+	startedAt: string
+	/** 会话完成时间 (ISO 8601)，null 表示进行中 */
+	completedAt: string | null
+}
+
+/**
+ * 行为 Delta — 干预前后指标差异的量化描述
+ */
+export interface BehaviorDelta {
+	/** 连续代码生成变化 (负值 = 减少 = 好) */
+	codeStreakDelta: number
+	/** 无编辑轮次变化 (负值 = 减少 = 好) */
+	noEditStreakDelta: number
+	/** code_edit 数量变化 (正值 = 增加 = 好) */
+	codeEditDelta: number
+	/** 用户主动发言数变化 (正值 = 增加 = 好) */
+	userTurnDelta: number
+	/** 综合改善分数 (-1 到 1，正值表示改善) */
+	improvementScore: number
+}
+
+/**
+ * 干预效果评估日志（持久化到 JSONL）
+ * 扩展自 StudentInteractionLog 的 intervention_evaluation 事件
+ */
+export interface InterventionEvaluationLog {
+	/** ISO 8601 时间戳 */
+	ts: string
+	/** 任务唯一标识 */
+	taskId: string
+	/** 事件类型固定为 intervention_evaluation */
+	eventType: "intervention_evaluation"
+	/** 评估会话 ID */
+	sessionId: string
+	/** 触发的规则 ID */
+	ruleId: BehaviorRuleId
+	/** 干预严重等级 */
+	severity: InterventionSeverity
+	/** 干预风格 */
+	style: InterventionStyle
+	/** 评估结果 */
+	outcome: EvaluationOutcome
+	/** 置信度 */
+	confidence: number
+	/** 干预前快照 */
+	preSnapshot: BehaviorSnapshot
+	/** 干预后快照 */
+	postSnapshot: BehaviorSnapshot
+	/** 行为变化量 */
+	behaviorDelta: BehaviorDelta
+	/** 观察窗口内收集的事件数 */
+	observedEventCount: number
+	/** 从干预到评估完成经过的毫秒数 */
+	evaluationDurationMs: number
+}
+
+/**
+ * 干预评估器配置选项
+ */
+export interface InterventionEvaluatorOptions {
+	/** 是否启用效果评估 */
+	enabled?: boolean
+	/** 观察窗口大小（干预后需收集的事件数） */
+	observationWindowSize?: number
+	/** 观察窗口最大超时（毫秒），超时自动关闭并按现有数据评估 */
+	observationTimeoutMs?: number
+	/** 行为改善判定阈值：improvementScore >= 此值判定为 improved */
+	improvedThreshold?: number
+	/** 行为无效判定阈值：improvementScore <= 此值判定为 no_effect */
+	noEffectThreshold?: number
+	/** 最大并行评估会话数（防止资源泄漏） */
+	maxConcurrentSessions?: number
 }

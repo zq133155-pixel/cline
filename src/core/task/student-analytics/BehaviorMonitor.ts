@@ -27,11 +27,11 @@ const DEFAULT_OPTIONS: Required<BehaviorMonitorOptions> = {
 	enabled: true,
 	debug: false, // 开发阶段默认开启，验证完毕后改为 false
 	windowSize: 20, // 覆盖 ~4 轮完整对话（每轮约 5 条事件）
-	cooldownMs: 60_000, // 60 秒冷却，兼顾调试效率和提醒频率
+	cooldownMs: 3_000, // [测试] 原值 60_000，改为 3 秒便于快速触发
 	minTurnsForDependency: 4, // 4 条 turn_message 即开始评估 AI 依赖
 	aiDependencyThreshold: 0.7, // 70% AI 参与占比（Cline 多工具调用场景下可达）
-	noEditTurnStreakThreshold: 5, // 连续 5 轮无编辑（约 2-3 轮对话）
-	consecutiveAssistantCodeThreshold: 2, // 连续 3 次 AI 生成代码
+	noEditTurnStreakThreshold: 2, // [测试] 原值 5
+	consecutiveAssistantCodeThreshold: 1, // [测试] 原值 3
 	adoptionRateThreshold: 0.7,
 	selfModificationThreshold: 0.25,
 	minAdoptionSamples: 2, // 2 条采纳推断即可评估
@@ -58,6 +58,16 @@ export class BehaviorMonitor {
 
 	public setEnabled(enabled: boolean): void {
 		this.options.enabled = enabled
+	}
+
+	/** 获取当前连续 AI 代码生成次数（供 InterventionEvaluator 快照使用） */
+	public getAssistantCodeStreak(): number {
+		return this.assistantCodeStreak
+	}
+
+	/** 获取连续无编辑轮次数（供 InterventionEvaluator 快照使用） */
+	public getTurnsSinceLastEdit(): number {
+		return this.turnsSinceLastEdit
 	}
 
 	public ingest(event: StudentInteractionLog): void {
@@ -247,9 +257,8 @@ export class BehaviorMonitor {
 		this.pendingAlerts.push(alert)
 	}
 
-	/**
-	 * 查看当前是否有待处理的风险警报（只读）
-	 */
+	//查看当前是否有待处理的风险警报（只读）
+
 	public hasPendingAlerts(): boolean {
 		return this.pendingAlerts.length > 0
 	}
