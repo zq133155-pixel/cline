@@ -288,7 +288,20 @@ export interface InterventionManagerOptions {
 	preferredStyle?: InterventionStyle
 	/** 是否在 OutputChannel 同时输出干预日志 */
 	logToOutputChannel?: boolean
+	/** 阻断式干预的触发阈值：第 N 次干预开始阻断 AI 输出（默认 2 = 第 2 次干预时阻断） */
+	blockingThreshold?: number
+	/** 阻断持续时间（毫秒），阻断期间 AI 不生成任何内容（默认 120_000 = 2 分钟） */
+	blockDurationMs?: number
 }
+
+/**
+ * 干预检查结果
+ * 区分普通提示干预和阻断式干预
+ */
+export type InterventionCheckResult =
+	| { type: "none" }
+	| { type: "hint"; text: string }
+	| { type: "blocking"; text: string; blockDurationMs: number; interventionCount: number }
 
 // =============================================
 // 干预效果评估 (Intervention Evaluation) 类型定义

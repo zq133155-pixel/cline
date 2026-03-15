@@ -1224,6 +1224,41 @@ export class Task {
 	}
 
 	/**
+	 * 启动干预效果评估会话
+	 * 在干预成功注入后调用，为评估器创建"干预前"快照并开启观察窗口
+	 */
+	private startInterventionEvaluation(
+		interventionManager: InstanceType<typeof TeachingInterventionManager>,
+		monitor: InstanceType<typeof BehaviorMonitor> | undefined,
+	): void {
+		try {
+			const evaluator = this.getInterventionEvaluator()
+			if (!evaluator || !monitor) {
+				return
+			}
+
+			// 从 BehaviorMonitor 当前状态创建"干预前"快照
+			const preSnapshot = InterventionEvaluator.createSnapshotFromMetrics(
+				monitor.getAssistantCodeStreak(),
+				monitor.getTurnsSinceLastEdit(),
+				this.taskState.apiRequestCount,
+			)
+
+			// 获取最近一次干预的 InterventionMessage（从历史记录中取）
+			const history = interventionManager.getInterventionHistory()
+			const lastRecord = history[history.length - 1]
+			if (lastRecord) {
+				const sessionId = evaluator.startEvaluation(lastRecord.intervention, preSnapshot)
+				if (sessionId) {
+					Logger.info(`[InterventionEvaluator][${this.taskId}] evaluation session started: ${sessionId}`)
+				}
+			}
+		} catch (error) {
+			Logger.warn("[InterventionEvaluator] failed to start evaluation session", error)
+		}
+	}
+
+	/**
 	 * 持久化干预效果评估日志
 	 * 从 InterventionEvaluator 消费评估结果，以 JSONL 写入日志文件
 	 */
@@ -2881,44 +2916,85 @@ export class Task {
 
 		// ========== 教学干预检查 ==========
 		// 在构建 API 请求之前，检查 BehaviorMonitor 是否触发了风险警报
-		// 如果触发，则在 userContent 中注入教学干预提示
-		// 注意：干预提示作为额外的 text block 追加，不修改用户原始输入
+		// 支持两种干预模式：
+		//   1. hint（提示式）：在 userContent 中注入教学提示，AI 继续正常生成
+		//   2. blocking（阻断式）：暂停 AI 生成，强制学生等待一段时间后才能继续
 		try {
 			const interventionManager = this.getInterventionManager()
 			if (interventionManager) {
 				const monitor = this.getBehaviorMonitor()
-				// 使用当前 API 请求计数作为轮次索引
-				const interventionText = interventionManager.checkAndGenerateIntervention(monitor, this.taskState.apiRequestCount)
-				if (interventionText) {
-					userContent.push({
-						type: "text",
-						text: interventionText,
-					})
+				// 使用 v2 方法，返回结构化结果
+				const interventionResult = interventionManager.checkIntervention(monitor, this.taskState.apiRequestCount)
+
+				if (interventionResult.type === "blocking") {
+					// ========== 阻断式干预 ==========
+					// 第 N 次干预（N >= blockingThreshold）时，阻断 AI 输出
+					// 强制学生暂停，利用等待时间反思学习
+					const blockMinutes = Math.ceil(interventionResult.blockDurationMs / 60_000)
+					const blockSeconds = Math.ceil(interventionResult.blockDurationMs / 1_000)
+
 					Logger.info(
-						`[TeachingIntervention][${this.taskId}] intervention injected at apiRequestCount=${this.taskState.apiRequestCount}`,
+						`[TeachingIntervention][${this.taskId}] BLOCKING: count=${interventionResult.interventionCount}, duration=${interventionResult.blockDurationMs}ms`,
 					)
 
-					// ========== 启动干预效果评估 ==========
-					// 干预成功注入后，在评估器中启动一个观察窗口
-					// 后续的行为事件会自动通过 monitorBehavior → evaluator.ingest 进入评估流程
-					const evaluator = this.getInterventionEvaluator()
-					if (evaluator && monitor) {
-						// 从 BehaviorMonitor 当前状态创建"干预前"快照
-						const preSnapshot = InterventionEvaluator.createSnapshotFromMetrics(
-							monitor.getAssistantCodeStreak(),
-							monitor.getTurnsSinceLastEdit(),
-							this.taskState.apiRequestCount,
-						)
-						// 获取最近一次干预的 InterventionMessage（从历史记录中取）
-						const history = interventionManager.getInterventionHistory()
-						const lastRecord = history[history.length - 1]
-						if (lastRecord) {
-							const sessionId = evaluator.startEvaluation(lastRecord.intervention, preSnapshot)
-							if (sessionId) {
-								Logger.info(`[InterventionEvaluator][${this.taskId}] evaluation session started: ${sessionId}`)
-							}
+					// 在对话中显示阻断消息
+					await this.say(
+						"text",
+						`⛔ **教学暂停**\n\n这是你第 ${interventionResult.interventionCount} 次触发教学干预提醒。系统检测到你持续依赖 AI 直接生成代码，为了帮助你更好地学习，AI 代码生成将暂停 **${blockSeconds >= 60 ? `${blockMinutes} 分钟` : `${blockSeconds} 秒`}**。\n\n请利用这段时间：\n1. 📖 回顾已生成的代码，理解其实现原理\n2. ✍️ 尝试自己手动编写类似功能\n3. 🤔 思考哪些部分你已经理解，哪些还需要学习\n\n⏳ AI 将在等待结束后恢复...`,
+					)
+
+					// 执行阻断等待（分段显示倒计时）
+					const totalMs = interventionResult.blockDurationMs
+					const intervalMs = Math.min(totalMs, 10_000) // 每 10 秒更新一次倒计时
+					let remaining = totalMs
+
+					while (remaining > 0) {
+						const waitTime = Math.min(intervalMs, remaining)
+						await new Promise<void>((resolve) => setTimeout(resolve, waitTime))
+						remaining -= waitTime
+
+						// 检查任务是否被中断
+						if (this.taskState.abort) {
+							Logger.info(`[TeachingIntervention][${this.taskId}] blocking interrupted: task aborted`)
+							break
+						}
+
+						if (remaining > 0) {
+							const remainSec = Math.ceil(remaining / 1_000)
+							await this.say(
+								"text",
+								`⏳ 教学暂停中... 剩余 **${remainSec >= 60 ? `${Math.ceil(remainSec / 60)} 分 ${remainSec % 60} 秒` : `${remainSec} 秒`}**`,
+							)
 						}
 					}
+
+					// 阻断结束
+					await this.say(
+						"text",
+						"✅ **暂停结束**，AI 代码生成已恢复。建议你接下来尝试先自己写代码，再让 AI 帮助你检查和改进。",
+					)
+
+					// 阻断式干预也注入提示文本到 userContent，以引导 AI 回复风格
+					userContent.push({
+						type: "text",
+						text: interventionResult.text,
+					})
+
+					// 启动干预效果评估
+					this.startInterventionEvaluation(interventionManager, monitor)
+				} else if (interventionResult.type === "hint") {
+					// ========== 提示式干预 ==========
+					// 正常注入干预文本，不阻断 AI 生成
+					userContent.push({
+						type: "text",
+						text: interventionResult.text,
+					})
+					Logger.info(
+						`[TeachingIntervention][${this.taskId}] hint intervention injected at apiRequestCount=${this.taskState.apiRequestCount}`,
+					)
+
+					// 启动干预效果评估
+					this.startInterventionEvaluation(interventionManager, monitor)
 				}
 			}
 		} catch (error) {

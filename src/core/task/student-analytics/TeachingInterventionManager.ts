@@ -18,6 +18,7 @@ import { formatInterventionForInjection, generateInterventionMessage } from "./I
 import type {
 	BehaviorAlert,
 	BehaviorRuleId,
+	InterventionCheckResult,
 	InterventionManagerOptions,
 	InterventionMessage,
 	InterventionRecord,
@@ -31,6 +32,8 @@ const DEFAULT_OPTIONS: Required<InterventionManagerOptions> = {
 	minTurnsBetweenInterventions: 0, // 至少间隔 3 轮对话
 	preferredStyle: "hint" as InterventionStyle, // 默认使用提示风格
 	logToOutputChannel: true,
+	blockingThreshold: 2, // 第 2 次干预开始阻断 AI 输出
+	blockDurationMs: 20_000, // [测试] 原值 120_000，改为 10 秒便于快速验证
 }
 
 export class TeachingInterventionManager {
@@ -52,6 +55,36 @@ export class TeachingInterventionManager {
 	constructor(taskId: string, options?: InterventionManagerOptions) {
 		this.taskId = taskId
 		this.options = { ...DEFAULT_OPTIONS, ...options }
+	}
+
+	/**
+	 * 核心方法 v2：检查是否需要干预，并返回结构化结果
+	 *
+	 * 返回值区分三种情况：
+	 * - none:     不需要干预
+	 * - hint:     提示式干预，注入文本即可，AI 继续正常生成
+	 * - blocking: 阻断式干预，需要暂停 AI 生成一段时间
+	 */
+	public checkIntervention(monitor: BehaviorMonitor | undefined, turnIndex: number): InterventionCheckResult {
+		const text = this.checkAndGenerateIntervention(monitor, turnIndex)
+		if (!text) {
+			return { type: "none" }
+		}
+
+		// 检查是否达到阻断阈值（当前干预已记录到历史中，所以用 length 比较）
+		if (this.interventionHistory.length >= this.options.blockingThreshold) {
+			Logger.info(
+				`[TeachingIntervention][${this.taskId}] BLOCKING intervention triggered: count=${this.interventionHistory.length}, threshold=${this.options.blockingThreshold}, blockDuration=${this.options.blockDurationMs}ms`,
+			)
+			return {
+				type: "blocking",
+				text,
+				blockDurationMs: this.options.blockDurationMs,
+				interventionCount: this.interventionHistory.length,
+			}
+		}
+
+		return { type: "hint", text }
 	}
 
 	/**
@@ -217,6 +250,16 @@ export class TeachingInterventionManager {
 	 */
 	public getInterventionCount(): number {
 		return this.interventionHistory.length
+	}
+
+	/**
+	 * 获取阻断配置
+	 */
+	public getBlockingConfig(): { threshold: number; durationMs: number } {
+		return {
+			threshold: this.options.blockingThreshold,
+			durationMs: this.options.blockDurationMs,
+		}
 	}
 
 	/**
