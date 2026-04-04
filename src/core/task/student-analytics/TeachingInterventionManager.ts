@@ -27,9 +27,9 @@ import type {
 
 const DEFAULT_OPTIONS: Required<InterventionManagerOptions> = {
 	enabled: true,
-	globalCooldownMs: 5_000, // 3 分钟全局冷却
+	globalCooldownMs: 180_000, // 3 分钟全局冷却
 	maxInterventionsPerTask: 8, // 单任务最多 8 次干预
-	minTurnsBetweenInterventions: 0, // 至少间隔 3 轮对话
+	minTurnsBetweenInterventions: 2, // 至少间隔 3 轮对话
 	preferredStyle: "hint" as InterventionStyle, // 默认使用提示风格
 	logToOutputChannel: true,
 	blockingThreshold: 2, // 第 2 次干预开始阻断 AI 输出

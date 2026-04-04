@@ -27,7 +27,7 @@ import type {
 	StudentInteractionLog,
 } from "./types"
 
-// ======================== 默认配置 ========================
+//======================== 默认配置 ========================
 
 const DEFAULT_OPTIONS: Required<InterventionEvaluatorOptions> = {
 	enabled: true,
