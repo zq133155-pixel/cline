@@ -31,7 +31,7 @@ import type {
 
 const DEFAULT_OPTIONS: Required<InterventionEvaluatorOptions> = {
 	enabled: true,
-	observationWindowSize: 3, // [测试] 原值 8，改为 3 便于快速看到评估结果
+	observationWindowSize: 8, // 观察窗口收集 8 条事件后再评估
 	observationTimeoutMs: 10 * 60 * 1000, // 10 分钟超时
 	improvedThreshold: 0.25, // improvementScore >= 0.25 判定为 improved
 	noEffectThreshold: -0.1, // improvementScore <= -0.1 判定为 no_effect

@@ -25,13 +25,13 @@ export interface BehaviorMonitorOptions {
 
 const DEFAULT_OPTIONS: Required<BehaviorMonitorOptions> = {
 	enabled: true,
-	debug: false, // 开发阶段默认开启，验证完毕后改为 false
+	debug: false, // 日常运行默认关闭，按需开启 debug 排查
 	windowSize: 20, // 覆盖 ~4 轮完整对话（每轮约 5 条事件）
-	cooldownMs: 60_000, // [测试] 原值 60_000，改为 3 秒便于快速触发
+	cooldownMs: 60_000, // 同一规则提醒冷却 60 秒
 	minTurnsForDependency: 4, // 4 条 turn_message 即开始评估 AI 依赖
 	aiDependencyThreshold: 0.7, // 70% AI 参与占比（Cline 多工具调用场景下可达）
-	noEditTurnStreakThreshold: 5, // [测试] 原值 5
-	consecutiveAssistantCodeThreshold: 3, // [测试] 原值 3
+	noEditTurnStreakThreshold: 5, // 连续 5 轮未编辑代码触发提醒
+	consecutiveAssistantCodeThreshold: 3, // 连续 3 次 assistant 产出代码触发提醒
 	adoptionRateThreshold: 0.7,
 	selfModificationThreshold: 0.25,
 	minAdoptionSamples: 2, // 2 条采纳推断即可评估

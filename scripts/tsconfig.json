@@ -1,0 +1,18 @@
+{
+	"extends": "../tsconfig.json",
+	"compilerOptions": {
+		"ignoreDeprecations": "6.0",
+		"lib": [
+			"es2022"
+		],
+		"types": [
+			"node"
+		]
+	},
+	"include": [
+		"./*.ts"
+	],
+	"exclude": [
+		"../node_modules"
+	]
+}

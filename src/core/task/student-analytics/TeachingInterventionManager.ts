@@ -27,13 +27,13 @@ import type {
 
 const DEFAULT_OPTIONS: Required<InterventionManagerOptions> = {
 	enabled: true,
-	globalCooldownMs: 180_000, // 3 分钟全局冷却
+	globalCooldownMs: 120_000, // 3 分钟全局冷却
 	maxInterventionsPerTask: 8, // 单任务最多 8 次干预
 	minTurnsBetweenInterventions: 2, // 至少间隔 3 轮对话
 	preferredStyle: "hint" as InterventionStyle, // 默认使用提示风格
 	logToOutputChannel: true,
-	blockingThreshold: 2, // 第 2 次干预开始阻断 AI 输出
-	blockDurationMs: 20_000, // [测试] 原值 120_000，改为 10 秒便于快速验证
+	blockingThreshold: 4, // 第 2 次干预开始阻断 AI 输出
+	blockDurationMs: 120_000, // 阻断持续 2 分钟
 }
 
 export class TeachingInterventionManager {
